@@ -1,0 +1,55 @@
+substitutions:
+  _ENV: "stage"
+  _CONFIG_FILE: "gcp-variables-stage.yaml"
+  _SCHEDULER_TIMEZONE: "Asia/Kolkata"
+
+steps:
+  # 1. Install deployment tooling
+  - name: "python:3.11-slim"
+    id: install-deps
+    entrypoint: pip
+    args: ["install", "-r", "requirements.txt", "--target", "/workspace/.deps"]
+
+  # 2. Run unit tests per function before any deploy
+  - name: "python:3.11-slim"
+    id: run-tests
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        export PYTHONPATH=/workspace/.deps
+        pytest functions/ -q
+
+  # 3. Deploy all Cloud Functions Gen2 defined in the env config
+  - name: "google/cloud-sdk:slim"
+    id: deploy-functions
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        export PYTHONPATH=/workspace/.deps
+        python3 deploy.py --env ${_ENV} --config ${_CONFIG_FILE}
+
+  # 4. Update-first-then-create pattern for Cloud Scheduler jobs
+  - name: "google/cloud-sdk:slim"
+    id: sync-scheduler-jobs
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        gcloud scheduler jobs update pubsub report-schedule-job \
+          --schedule="0 */2 * * *" \
+          --topic=report-schedule-trigger \
+          --message-body='{"trigger":"cloudbuild"}' \
+          --time-zone="${_SCHEDULER_TIMEZONE}" \
+        || gcloud scheduler jobs create pubsub report-schedule-job \
+          --schedule="0 */2 * * *" \
+          --topic=report-schedule-trigger \
+          --message-body='{"trigger":"cloudbuild"}' \
+          --time-zone="${_SCHEDULER_TIMEZONE}"
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  dynamic_substitutions: true
+
+timeout: 1800s
